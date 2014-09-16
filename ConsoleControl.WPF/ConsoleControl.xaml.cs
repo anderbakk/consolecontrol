@@ -1,7 +1,8 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 using ConsoleControlAPI;
@@ -13,6 +14,8 @@ namespace ConsoleControl.WPF
     /// </summary>
     public partial class ConsoleControl : UserControl
     {
+        private List<string> _enteredCommands = new List<string>();
+        private int _currentEnteredCommand = 0;
         /// <summary>
         /// Initializes a new instance of the <see cref="ConsoleControl"/> class.
         /// </summary>
@@ -21,14 +24,16 @@ namespace ConsoleControl.WPF
             InitializeComponent();
             
             //  Handle process events.
-            processInterace.OnProcessOutput += processInterace_OnProcessOutput;
-            processInterace.OnProcessError += processInterace_OnProcessError;
-            processInterace.OnProcessInput += processInterace_OnProcessInput;
-            processInterace.OnProcessExit += processInterace_OnProcessExit;
-
-            //  Wait for key down messages on the rich text box.
-            richTextBoxConsole.KeyDown += richTextBoxConsole_KeyDown;
+            _processInterace.OnProcessOutput += processInterace_OnProcessOutput;
+            _processInterace.OnProcessError += processInterace_OnProcessError;
+            _processInterace.OnProcessInput += processInterace_OnProcessInput;
+            _processInterace.OnProcessExit += processInterace_OnProcessExit;
+            
+            InputConsole.KeyUp += InputConsoleKeyDown;
+            InputConsole.PreviewKeyUp += InputConsole_PreviewKeyUp;
         }
+
+
 
         /// <summary>
         /// Handles the OnProcessError event of the processInterace control.
@@ -78,16 +83,9 @@ namespace ConsoleControl.WPF
             //  Are we showing diagnostics?
             if (ShowDiagnostics)
             {
-                WriteOutput(Environment.NewLine + processInterace.ProcessFileName + " exited.", Color.FromArgb(255, 0, 255, 0));
+                WriteOutput(Environment.NewLine + _processInterace.ProcessFileName + " exited.", Color.FromArgb(255, 0, 255, 0));
             }
 
-            //  Read only again.
-            RunOnUIDespatcher(() =>
-                {
-                    richTextBoxConsole.IsReadOnly = true;
-                });
-
-            //  And we're no longer running.
             IsProcessRunning = false;
         }
 
@@ -96,37 +94,50 @@ namespace ConsoleControl.WPF
         /// </summary>
         /// <param name="sender">The source of the event.</param>
         /// <param name="e">The <see cref="System.Windows.Input.KeyEventArgs" /> instance containing the event data.</param>
-        void richTextBoxConsole_KeyDown(object sender, KeyEventArgs e)
+        void InputConsoleKeyDown(object sender, KeyEventArgs e)
         {
-            bool inReadOnlyZone = richTextBoxConsole.Selection.Start.CompareTo(inputStart) < 0;
+            if (e.Key != Key.Return) return;
 
-            //  If we're at the input point and it's backspace, bail.
-            if (inReadOnlyZone && e.Key == Key.Back)
-                e.Handled = true;
+            var input = InputConsole.Text;
+            AddCommand(input);
+            InputConsole.Text = string.Empty;
+            WriteInput(input, Colors.White, false);
+        }
 
-            //  Are we in the read-only zone?
-            if (inReadOnlyZone)
+        void InputConsole_PreviewKeyUp(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Up ||
+                e.Key == Key.Down)
             {
-                //  Allow arrows and Ctrl-C.
-                if (!(e.Key == Key.Left ||
-                    e.Key == Key.Right ||
-                    e.Key == Key.Up ||
-                    e.Key == Key.Down ||
-                    (e.Key == Key.C && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))))
-                {
-                    e.Handled = true;
-                }
+                SetPreviousCommand(e.Key);
             }
+        }
 
-            //  Is it the return key?
-            if (e.Key == Key.Return)
-            {
-                //  Get the input.
-                //todostring input = richTextBoxConsole.Text.Substring(inputStart, (richTextBoxConsole.SelectionStart) - inputStart);
+        private void SetPreviousCommand(Key key)
+        {
+            if (_enteredCommands.Count == 0)
+                return;
 
-                //  Write the input (without echoing).
-                //todoWriteInput(input, Colors.White, false);
-            }
+            if (key == Key.Up)
+                _currentEnteredCommand--;
+            if (key == Key.Down)
+                _currentEnteredCommand++;
+
+            if (_currentEnteredCommand > _enteredCommands.Count - 1)
+                _currentEnteredCommand = _enteredCommands.Count - 1;
+
+            if (_currentEnteredCommand < 0)
+                _currentEnteredCommand = 0;
+
+            InputConsole.Text = _enteredCommands[_currentEnteredCommand];
+        }
+
+        private void AddCommand(string input)
+        {
+            if (_enteredCommands.LastOrDefault() == input) return;
+            
+            _enteredCommands.Add(input);
+            _currentEnteredCommand = _enteredCommands.Count - 1;
         }
 
         /// <summary>
@@ -136,16 +147,16 @@ namespace ConsoleControl.WPF
         /// <param name="color">The color.</param>
         public void WriteOutput(string output, Color color)
         {
-            if (string.IsNullOrEmpty(lastInput) == false &&
-                (output == lastInput || output.Replace("\r\n", "") == lastInput))
+            if (string.IsNullOrEmpty(_lastInput) == false &&
+                (output == _lastInput || output.Replace("\r\n", "") == _lastInput))
                 return;
 
-            RunOnUIDespatcher(() =>
+            RunOnUiDespatcher(() =>
                 {
                     //  Write the output.
-                    richTextBoxConsole.Selection.ApplyPropertyValue(TextBlock.ForegroundProperty, new SolidColorBrush(color));
-                    richTextBoxConsole.AppendText(output);
-                    inputStart = richTextBoxConsole.Selection.Start;
+                    RichTextBoxConsole.Selection.ApplyPropertyValue(TextBlock.ForegroundProperty, new SolidColorBrush(color));
+                    RichTextBoxConsole.AppendText(output);
+                    RichTextBoxConsole.ScrollToEnd();
                 });
         }
 
@@ -155,7 +166,6 @@ namespace ConsoleControl.WPF
         public void ClearOutput()
         {
            //todo richTextBoxConsole.Clear();
-            inputStart = null;
         }
 
         /// <summary>
@@ -166,20 +176,19 @@ namespace ConsoleControl.WPF
         /// <param name="echo">if set to <c>true</c> echo the input.</param>
         public void WriteInput(string input, Color color, bool echo)
         {
-            RunOnUIDespatcher(() =>
+            RunOnUiDespatcher(() =>
                 {
                     //  Are we echoing?
                     if (echo)
                     {
-                        richTextBoxConsole.Selection.ApplyPropertyValue(TextBlock.ForegroundProperty, new SolidColorBrush(color));
-                        richTextBoxConsole.AppendText(input);
-                        inputStart = richTextBoxConsole.Selection.Start;
+                        RichTextBoxConsole.Selection.ApplyPropertyValue(TextBlock.ForegroundProperty, new SolidColorBrush(color));
+                        RichTextBoxConsole.AppendText(input);
                     }
 
-                    lastInput = input;
+                    _lastInput = input;
 
                     //  Write the input.
-                    processInterace.WriteInput(input);
+                    _processInterace.WriteInput(input);
 
                     //  Fire the event.
                     FireProcessInputEvent(new ProcessEventArgs(input));
@@ -190,7 +199,7 @@ namespace ConsoleControl.WPF
         /// Runs the on UI despatcher.
         /// </summary>
         /// <param name="action">The action.</param>
-        private void RunOnUIDespatcher(Action action)
+        private void RunOnUiDespatcher(Action action)
         {
             if (Dispatcher.CheckAccess())
             {
@@ -222,11 +231,7 @@ namespace ConsoleControl.WPF
             }
 
             //  Start the process.
-            processInterace.StartProcess(fileName, arguments);
-
-            //  If we enable input, make the control not read only.
-            if (IsInputEnabled)
-                richTextBoxConsole.IsReadOnly = false;
+            _processInterace.StartProcess(fileName, arguments);
 
             //  We're now running.
             IsProcessRunning = true;
@@ -238,7 +243,7 @@ namespace ConsoleControl.WPF
         public void StopProcess()
         {
             //  Stop the interface.
-            processInterace.StopProcess();
+            _processInterace.StopProcess();
         }
 
         /// <summary>
@@ -268,17 +273,12 @@ namespace ConsoleControl.WPF
         /// <summary>
         /// The internal process interface used to interface with the process.
         /// </summary>
-        private readonly ProcessInterface processInterace = new ProcessInterface();
+        private readonly ProcessInterface _processInterace = new ProcessInterface();
 
-        /// <summary>
-        /// Current position that input starts at.
-        /// </summary>
-        private TextPointer inputStart;
-        
         /// <summary>
         /// The last input string (used so that we can make sure we don't echo input twice).
         /// </summary>
-        private string lastInput;
+        private string _lastInput;
         
         /// <summary>
         /// Occurs when console output is produced.
